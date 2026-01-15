@@ -1,55 +1,74 @@
 <!doctype html>
-<html>
+<html lang="zh-Hant">
 <head>
-  <meta charset="utf-8">
-  <title>P2HD BLE Test</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>P2HD WebBLE 診斷</title>
+  <style>
+    body{font-family:system-ui,-apple-system,"Noto Sans TC",Arial;padding:16px}
+    button{padding:10px 14px;border-radius:12px;border:1px solid #ccc;background:#fff}
+    pre{white-space:pre-wrap;background:#f6f6f6;padding:12px;border-radius:12px}
+  </style>
 </head>
 <body>
-  <button id="connect">Connect P2HD</button>
+  <button id="btn">Connect & Dump Services</button>
   <pre id="log"></pre>
 
 <script>
-const log = (m) => {
-  document.getElementById('log').textContent += m + '\n';
-};
+const logEl = document.getElementById('log');
+const log = (...a)=>{ logEl.textContent += a.join(' ') + "\n"; };
 
-// ⚠️ 這就是你截圖中的真正 Service UUID
-const SERVICE_UUID = '0000fff0-c243-40b9-ac41-a10ba3ad5d1a';
+function flags(p){
+  const f=[];
+  if(p.read) f.push('read');
+  if(p.write) f.push('write');
+  if(p.writeWithoutResponse) f.push('writeNR');
+  if(p.notify) f.push('notify');
+  if(p.indicate) f.push('indicate');
+  return f.join(',');
+}
 
-let device, server;
-
-document.getElementById('connect').addEventListener('click', async () => {
+document.getElementById('btn').addEventListener('click', async () => {
   try {
-    log('Requesting device...');
-    device = await navigator.bluetooth.requestDevice({
-      acceptAllDevices: true,
-      optionalServices: [SERVICE_UUID]
+    if (!window.isSecureContext) throw new Error('Not HTTPS / not secure context');
+    if (!navigator.bluetooth) throw new Error('WebBluetooth not supported');
+
+    log('Requesting device…');
+
+    // 1) 用 namePrefix 降低選錯機率（若你的裝置廣播名是 PAPERANG_P2 HD，這招很有效）
+    // 如果你掃描清單根本不顯示名字，改成 acceptAllDevices:true（我在下方註解給你）
+    const device = await navigator.bluetooth.requestDevice({
+      filters: [{ namePrefix: 'PAPERANG' }],
+      optionalServices: [
+        'generic_access',
+        'device_information',
+        'battery_service'
+        // 不先填 fff0，因為你現在的問題就是 Web 端看不到它；
+        // 我們先 dump 出 Web 端實際可見的 services，再決定真正 UUID。
+      ]
     });
 
-    log('Selected: ' + (device.name || 'no name'));
-    server = await device.gatt.connect();
+    log('Selected:', device.name || '(no name)');
+    const server = await device.gatt.connect();
     log('GATT connected');
 
-    // ⭐ 直接抓這個 service（不再用 getPrimaryServices()）
-    const service = await server.getPrimaryService(SERVICE_UUID);
-    log('Service OK: ' + service.uuid);
+    // 2) 列出「Web 端可見」的所有 services
+    const services = await server.getPrimaryServices();
+    log('Visible primary services count:', services.length);
 
-    const chars = await service.getCharacteristics();
-    log('Characteristics count: ' + chars.length);
+    for (const svc of services) {
+      log('\nSERVICE:', svc.uuid);
+      const chars = await svc.getCharacteristics();
+      log('  chars:', chars.length);
+      for (const ch of chars) {
+        log('   - CHAR:', ch.uuid, ' [' + flags(ch.properties) + ']');
+      }
+    }
 
-    chars.forEach(ch => {
-      const p = ch.properties;
-      log(
-        `Char ${ch.uuid} | ` +
-        `write=${p.write} ` +
-        `writeNR=${p.writeWithoutResponse} ` +
-        `notify=${p.notify} ` +
-        `read=${p.read}`
-      );
-    });
+    log('\nDONE. (If only 1800/1801 show up, the printer is hiding custom services from WebBluetooth.)');
 
   } catch (e) {
-    log('ERROR: ' + e.message);
+    log('ERROR:', e.message);
   }
 });
 </script>
