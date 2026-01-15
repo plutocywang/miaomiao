@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>P2HD WebBLE 測試</title>
+</head>
+<body>
+  <button id="btnConnect">Connect Printer</button>
+  <pre id="log"></pre>
+
+<script>
+const log = (s) => document.getElementById('log').textContent += s + '\n';
+
+// 這組 UUID 來自 paperang-web 的整理
+const SERVICE_UUID = '49535343-fe7d-4ae5-8fa9-9fafd205e455';
+const WRITE_UUID   = '49535343-6daa-4d02-abf6-19569aca69fe';
+const NOTIFY_UUID  = '49535343-1e4d-4bd9-ba61-23c647249616';
+
+let device, server, service, writeChar, notifyChar;
+
+document.getElementById('btnConnect').addEventListener('click', async () => {
+  try {
+    log('Requesting device...');
+    device = await navigator.bluetooth.requestDevice({
+      // 如果掃不到，可把 filters 改成 acceptAllDevices: true（但會更雜）
+      filters: [{ services: [SERVICE_UUID] }],
+      optionalServices: [SERVICE_UUID],
+    });
+
+    log('Connecting GATT...');
+    server = await device.gatt.connect();
+
+    log('Getting service...');
+    service = await server.getPrimaryService(SERVICE_UUID);
+
+    log('Getting characteristics...');
+    writeChar  = await service.getCharacteristic(WRITE_UUID);
+    notifyChar = await service.getCharacteristic(NOTIFY_UUID);
+
+    await notifyChar.startNotifications();
+    notifyChar.addEventListener('characteristicvaluechanged', (ev) => {
+      const v = new Uint8Array(ev.target.value.buffer);
+      log('Notify: ' + Array.from(v).map(x => x.toString(16).padStart(2,'0')).join(' '));
+    });
+
+    log('Connected OK.');
+  } catch (err) {
+    log('ERROR: ' + err.message);
+  }
+});
+</script>
+</body>
+</html>
