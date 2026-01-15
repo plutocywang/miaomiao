@@ -24,7 +24,8 @@ document.getElementById('btnConnect').addEventListener('click', async () => {
     log('Requesting device...');
     device = await navigator.bluetooth.requestDevice({
       // 如果掃不到，可把 filters 改成 acceptAllDevices: true（但會更雜）
-      filters: [{ services: [SERVICE_UUID] }],
+      //filters: [{ services: [SERVICE_UUID] }],
+      acceptAllDevices: true
       optionalServices: [SERVICE_UUID],
     });
 
@@ -52,3 +53,4 @@ document.getElementById('btnConnect').addEventListener('click', async () => {
 </script>
 </body>
 </html>
+
