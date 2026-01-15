@@ -3,54 +3,452 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>P2HD WebBLE 測試</title>
+  <title>P2HD Web Bluetooth 新手版（完整範例）</title>
+  <style>
+    body { font-family: system-ui, -apple-system, "Noto Sans TC", Arial; margin: 0; padding: 16px; line-height: 1.5; }
+    h1 { font-size: 18px; margin: 0 0 8px; }
+    .row { margin: 10px 0; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    button, input[type="file"] { font-size: 15px; }
+    button { padding: 10px 14px; border-radius: 12px; border: 1px solid #cfcfcf; background: #fff; }
+    button:disabled { opacity: 0.5; }
+    .pill { display: inline-block; padding: 4px 10px; border-radius: 999px; border: 1px solid #ddd; font-size: 12px; }
+    .ok { color: #0a7; border-color: #0a7; }
+    .bad { color: #c22; border-color: #c22; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    #log { white-space: pre-wrap; background: #f6f6f6; padding: 12px; border-radius: 12px; height: 260px; overflow: auto; }
+    #preview { max-width: 100%; border: 1px dashed #aaa; border-radius: 12px; margin-top: 8px; }
+    label { font-size: 14px; }
+    textarea { width: 100%; min-height: 76px; border-radius: 12px; border: 1px solid #ddd; padding: 10px; font-size: 14px; }
+    .small { font-size: 12px; color: #555; }
+    .warn { background: #fff3cd; border: 1px solid #ffeeba; padding: 10px; border-radius: 12px; }
+    .info { background: #eef6ff; border: 1px solid #cfe6ff; padding: 10px; border-radius: 12px; }
+  </style>
 </head>
 <body>
-  <button id="btnConnect">Connect Printer</button>
-  <pre id="log"></pre>
+  <h1>P2HD Web Bluetooth 新手版（完整 HTML）</h1>
+
+  <div class="info small">
+    必要條件：<b>Android + Chrome/Edge</b>、且頁面必須是 <b>HTTPS</b>（Netlify/GitHub Pages）。<br/>
+    iPhone / iOS Safari 不支援 Web Bluetooth，因此會顯示「不支援」提示。
+  </div>
+
+  <div class="row">
+    <span id="badgeSecure" class="pill mono">Secure: ?</span>
+    <span id="badgeBT" class="pill mono">WebBluetooth: ?</span>
+    <span id="badgeOS" class="pill mono">OS: ?</span>
+  </div>
+
+  <div class="row">
+    <button id="btnDiag">0) 環境檢查（一定要先按）</button>
+    <button id="btnConnect">1) Connect Printer（掃描/配對）</button>
+    <button id="btnDiscover" disabled>2) 列出 Services/Characteristics</button>
+    <button id="btnPickWritable" disabled>3) 自動選 Writable Characteristic</button>
+  </div>
+
+  <div class="row">
+    <button id="btnWriteHello" disabled>4) 寫入測試（HELLO）</button>
+    <button id="btnNotifyOn" disabled>5) 開啟 Notify（若有）</button>
+    <span class="small mono" id="chosenInfo"></span>
+  </div>
+
+  <div class="row">
+    <label class="small">詩句（先用假資料或手動貼上；你之後再接 AI）：</label>
+  </div>
+  <textarea id="poem" placeholder="例：\n我把光摺成一張小紙\n塞進口袋裡\n在你走過的路上\n它慢慢發熱\n"></textarea>
+
+  <div class="row">
+    <input id="file" type="file" accept="image/*" capture="environment" disabled />
+    <button id="btnCompose" disabled>6) 合成「圖片+詩」到 Canvas</button>
+    <button id="btnSendBitmap" disabled>7) 送出位圖資料（不保證印出）</button>
+  </div>
+
+  <canvas id="preview" width="384" height="10"></canvas>
+
+  <div class="row">
+    <label class="small">Log（請把這裡的內容貼回來，才能精準對接 P2HD 協定）：</label>
+  </div>
+  <pre id="log" class="mono"></pre>
 
 <script>
-const log = (s) => document.getElementById('log').textContent += s + '\n';
+/** ========= 基礎工具 ========= **/
+const logEl = document.getElementById('log');
+function log(...args) {
+  const s = args.map(a => (typeof a === 'string' ? a : JSON.stringify(a, null, 2))).join(' ');
+  logEl.textContent += s + '\n';
+  logEl.scrollTop = logEl.scrollHeight;
+}
+function toHex(u8) {
+  return Array.from(u8).map(x => x.toString(16).padStart(2, '0')).join(' ');
+}
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+function isIOS() {
+  const ua = navigator.userAgent || '';
+  return /iPad|iPhone|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+}
+function osLabel() {
+  if (isIOS()) return 'iOS';
+  const ua = navigator.userAgent || '';
+  if (/Android/i.test(ua)) return 'Android';
+  if (/Windows/i.test(ua)) return 'Windows';
+  if (/Mac/i.test(ua)) return 'Mac';
+  return 'Unknown';
+}
 
-// 這組 UUID 來自 paperang-web 的整理
-const SERVICE_UUID = '49535343-fe7d-4ae5-8fa9-9fafd205e455';
-const WRITE_UUID   = '49535343-6daa-4d02-abf6-19569aca69fe';
-const NOTIFY_UUID  = '49535343-1e4d-4bd9-ba61-23c647249616';
+/** ========= 狀態 ========= **/
+let device = null;
+let server = null;
+let services = [];
+let allChars = []; // { serviceUuid, char, props }
+let writeChar = null;
+let notifyChar = null;
 
-let device, server, service, writeChar, notifyChar;
+// 這是 Paperang/喵喵機系常見 Transparent UART 服務 UUID（很多機型會用，但不保證）
+// 我們掃描階段不用 filters，避免掃不到；連線後再找這個 service。
+const COMMON_SERVICE_UUID = '49535343-fe7d-4ae5-8fa9-9fafd205e455';
 
+const badgeSecure = document.getElementById('badgeSecure');
+const badgeBT = document.getElementById('badgeBT');
+const badgeOS = document.getElementById('badgeOS');
+const chosenInfo = document.getElementById('chosenInfo');
+
+function setBadge(el, ok, text) {
+  el.textContent = text;
+  el.classList.remove('ok', 'bad');
+  el.classList.add(ok ? 'ok' : 'bad');
+}
+
+/** ========= 0) 環境檢查 ========= **/
+document.getElementById('btnDiag').addEventListener('click', () => {
+  alert('DIAG: click event works.');
+
+  const secure = window.isSecureContext;
+  setBadge(badgeSecure, secure, 'Secure: ' + secure);
+
+  const btSupported = !!navigator.bluetooth;
+  setBadge(badgeBT, btSupported, 'WebBluetooth: ' + btSupported);
+
+  const os = osLabel();
+  setBadge(badgeOS, os !== 'Unknown', 'OS: ' + os);
+
+  log('--- DIAG ---');
+  log('isSecureContext:', secure);
+  log('navigator.bluetooth exists:', btSupported);
+  log('UserAgent:', navigator.userAgent);
+
+  if (isIOS()) {
+    log('⚠️ 你目前看起來是 iOS。iOS Safari 不支援 Web Bluetooth；若要連 P2HD，需改用原生 App（React Native/Flutter/Swift）。');
+    alert('你是 iOS：Safari 不支援 Web Bluetooth。若你要用網頁連藍牙，請改 Android Chrome。');
+  }
+
+  if (!secure) {
+    log('❌ 非 Secure Context：請用 https:// 網址（Netlify/GitHub Pages）或 localhost。');
+    alert('Web Bluetooth 需要 HTTPS（或 localhost）。請用 Netlify/GitHub Pages 的 https 網址開啟。');
+  }
+
+  if (!btSupported) {
+    log('❌ 瀏覽器不支援 Web Bluetooth：請用 Android 的 Chrome/Edge。');
+    alert('此瀏覽器不支援 Web Bluetooth。請改用 Android Chrome/Edge。');
+  }
+});
+
+/** ========= 1) Connect Printer ========= **/
 document.getElementById('btnConnect').addEventListener('click', async () => {
+  alert('CONNECT: click received.'); // 確認按鈕真的有觸發
+
   try {
-    log('Requesting device...');
+    if (!window.isSecureContext) throw new Error('Not a secure context. Please use HTTPS.');
+    if (!navigator.bluetooth) throw new Error('Web Bluetooth not supported in this browser.');
+    if (isIOS()) throw new Error('iOS Safari does not support Web Bluetooth.');
+
+    log('--- CONNECT ---');
+    log('Requesting device (acceptAllDevices: true)...');
+
+    // 關鍵：先用 acceptAllDevices，避免 service filter 掃不到裝置
     device = await navigator.bluetooth.requestDevice({
-      // 如果掃不到，可把 filters 改成 acceptAllDevices: true（但會更雜）
-      //filters: [{ services: [SERVICE_UUID] }],
-      acceptAllDevices: true
-      optionalServices: [SERVICE_UUID],
+      acceptAllDevices: true,
+      // optionalServices：讓後續 getPrimaryService 時有機會拿到更多服務資訊
+      optionalServices: [COMMON_SERVICE_UUID, 'battery_service']
     });
 
+    log('Selected device name:', device.name || '(no name)');
     log('Connecting GATT...');
     server = await device.gatt.connect();
+    log('✅ GATT connected.');
 
-    log('Getting service...');
-    service = await server.getPrimaryService(SERVICE_UUID);
+    document.getElementById('btnDiscover').disabled = false;
+    document.getElementById('file').disabled = false;
+    document.getElementById('btnCompose').disabled = false;
 
-    log('Getting characteristics...');
-    writeChar  = await service.getCharacteristic(WRITE_UUID);
-    notifyChar = await service.getCharacteristic(NOTIFY_UUID);
+    alert('已連線成功（GATT connected）。下一步請按「列出 Services/Characteristics」。');
 
+  } catch (e) {
+    log('❌ CONNECT error:', e.message);
+    alert('Connect 失敗：' + e.message);
+  }
+});
+
+/** ========= 2) 列出 Services/Characteristics ========= **/
+document.getElementById('btnDiscover').addEventListener('click', async () => {
+  try {
+    if (!server) throw new Error('No GATT server. Please connect first.');
+
+    log('--- DISCOVER ---');
+    services = await server.getPrimaryServices();
+    log('Primary services count:', services.length);
+
+    allChars = [];
+    for (const svc of services) {
+      const chars = await svc.getCharacteristics();
+      log('Service:', svc.uuid, 'chars:', chars.length);
+
+      for (const ch of chars) {
+        const p = ch.properties;
+        const flags = [];
+        if (p.read) flags.push('read');
+        if (p.write) flags.push('write');
+        if (p.writeWithoutResponse) flags.push('writeWithoutResponse');
+        if (p.notify) flags.push('notify');
+        if (p.indicate) flags.push('indicate');
+
+        log('  - Char:', ch.uuid, '[' + flags.join(',') + ']');
+
+        allChars.push({ serviceUuid: svc.uuid, char: ch, props: p });
+      }
+    }
+
+    document.getElementById('btnPickWritable').disabled = false;
+    alert('已列出所有 Services/Characteristics。下一步按「自動選 Writable」。');
+
+  } catch (e) {
+    log('❌ DISCOVER error:', e.message);
+    alert('Discover 失敗：' + e.message);
+  }
+});
+
+/** ========= 3) 自動選 Writable + Notify ========= **/
+document.getElementById('btnPickWritable').addEventListener('click', async () => {
+  try {
+    if (!allChars.length) throw new Error('No characteristics discovered.');
+
+    log('--- PICK WRITABLE ---');
+
+    // 優先：在 COMMON_SERVICE_UUID 服務下找可寫
+    const inCommonSvc = allChars.filter(x => x.serviceUuid === COMMON_SERVICE_UUID);
+
+    function pickWrite(list) {
+      // 先挑 writeWithoutResponse（通常列印流量大比較好）
+      let w = list.find(x => x.props.writeWithoutResponse);
+      if (!w) w = list.find(x => x.props.write);
+      return w ? w.char : null;
+    }
+    function pickNotify(list) {
+      const n = list.find(x => x.props.notify);
+      return n ? n.char : null;
+    }
+
+    writeChar = pickWrite(inCommonSvc) || pickWrite(allChars);
+    notifyChar = pickNotify(inCommonSvc) || pickNotify(allChars);
+
+    if (!writeChar) throw new Error('找不到可寫入的 characteristic（write/writeWithoutResponse）。');
+
+    chosenInfo.textContent =
+      `write: ${writeChar.uuid}  |  notify: ${notifyChar ? notifyChar.uuid : '(none)'}`;
+
+    log('✅ Selected writeChar:', writeChar.uuid);
+    if (notifyChar) log('✅ Selected notifyChar:', notifyChar.uuid);
+    else log('⚠️ No notify characteristic found (ok).');
+
+    document.getElementById('btnWriteHello').disabled = false;
+    document.getElementById('btnSendBitmap').disabled = false;
+    document.getElementById('btnNotifyOn').disabled = !notifyChar;
+
+    alert('已選定可寫入的 characteristic。可先按「寫入 HELLO」測試。');
+
+  } catch (e) {
+    log('❌ PICK error:', e.message);
+    alert('Pick Writable 失敗：' + e.message);
+  }
+});
+
+/** ========= 4) 寫入測試（HELLO） ========= **/
+document.getElementById('btnWriteHello').addEventListener('click', async () => {
+  try {
+    if (!writeChar) throw new Error('No writeChar selected.');
+    log('--- WRITE HELLO ---');
+    const data = new TextEncoder().encode('HELLO');
+    // 先用 writeValueWithoutResponse（若不支援會丟錯誤，改用 writeValue）
+    if (writeChar.properties.writeWithoutResponse) {
+      await writeChar.writeValueWithoutResponse(data);
+    } else {
+      await writeChar.writeValue(data);
+    }
+    log('✅ Wrote bytes:', toHex(data));
+    alert('已寫入 HELLO（不代表會印出，但代表通道可寫）。');
+  } catch (e) {
+    log('❌ WRITE HELLO error:', e.message);
+    alert('寫入失敗：' + e.message);
+  }
+});
+
+/** ========= 5) 開啟 Notify ========= **/
+document.getElementById('btnNotifyOn').addEventListener('click', async () => {
+  try {
+    if (!notifyChar) throw new Error('No notifyChar.');
+    log('--- NOTIFY ON ---');
     await notifyChar.startNotifications();
     notifyChar.addEventListener('characteristicvaluechanged', (ev) => {
       const v = new Uint8Array(ev.target.value.buffer);
-      log('Notify: ' + Array.from(v).map(x => x.toString(16).padStart(2,'0')).join(' '));
+      log('🔔 Notify:', toHex(v));
     });
+    log('✅ Notifications started.');
+    alert('Notify 已開啟。若印表機有回應，log 會顯示。');
+  } catch (e) {
+    log('❌ NOTIFY error:', e.message);
+    alert('Notify 失敗：' + e.message);
+  }
+});
 
-    log('Connected OK.');
-  } catch (err) {
-    log('ERROR: ' + err.message);
+/** ========= 合成「圖片 + 詩」到 Canvas ========= **/
+const fileInput = document.getElementById('file');
+const poemInput = document.getElementById('poem');
+const preview = document.getElementById('preview');
+const pctx = preview.getContext('2d', { willReadFrequently: true });
+
+let composedImageData = null; // ImageData（RGBA）
+let composedW = 384, composedH = 0;
+
+document.getElementById('btnCompose').addEventListener('click', async () => {
+  try {
+    const f = fileInput.files && fileInput.files[0];
+    if (!f) throw new Error('請先選一張照片。');
+
+    const bmp = await createImageBitmap(f);
+    const targetW = 384;
+    const scale = targetW / bmp.width;
+    const imgH = Math.max(1, Math.round(bmp.height * scale));
+
+    // 詩區高度估算：每行 22px，最多 12 行，外加 padding
+    const poemLines = (poemInput.value || '').trim().split('\n').filter(Boolean);
+    const lines = poemLines.length ? poemLines : ['（這裡會印出你的新詩）'];
+    const maxLines = Math.min(lines.length, 12);
+    const poemH = 24 * (maxLines + 2);
+
+    composedW = targetW;
+    composedH = imgH + poemH;
+
+    preview.width = composedW;
+    preview.height = composedH;
+
+    // 背景白
+    pctx.fillStyle = '#fff';
+    pctx.fillRect(0, 0, composedW, composedH);
+
+    // 圖片
+    pctx.drawImage(bmp, 0, 0, composedW, imgH);
+
+    // 詩文字（先用黑字畫；後面會二值化）
+    pctx.fillStyle = '#000';
+    pctx.font = '18px system-ui, -apple-system, "Noto Sans TC", Arial';
+    pctx.textBaseline = 'top';
+
+    const leftPad = 12;
+    let y = imgH + 12;
+    for (let i = 0; i < maxLines; i++) {
+      pctx.fillText(lines[i], leftPad, y);
+      y += 24;
+    }
+
+    composedImageData = pctx.getImageData(0, 0, composedW, composedH);
+    log('--- COMPOSE ---');
+    log(`✅ Canvas composed: ${composedW}x${composedH}, poem lines: ${maxLines}`);
+    alert('已合成到 Canvas。下一步可按「送出位圖資料」。');
+  } catch (e) {
+    log('❌ COMPOSE error:', e.message);
+    alert('Compose 失敗：' + e.message);
+  }
+});
+
+/** ========= 影像 → 1-bit 位圖打包（384 寬） ========= **/
+function imageDataTo1BitPacked(imgData, threshold = 160) {
+  const { data, width, height } = imgData;
+
+  // 轉灰階 + 二值化（簡易門檻；之後可升級 Floyd–Steinberg 抖動）
+  const mono = new Uint8Array(width * height); // 1=黑 0=白
+  for (let i = 0; i < width * height; i++) {
+    const r = data[i * 4 + 0];
+    const g = data[i * 4 + 1];
+    const b = data[i * 4 + 2];
+    // 忽略 alpha
+    const y = (0.299 * r + 0.587 * g + 0.114 * b);
+    mono[i] = (y < threshold) ? 1 : 0;
+  }
+
+  // 每 8 像素打包成 1 byte（MSB→LSB）
+  const bytesPerRow = Math.ceil(width / 8);
+  const packed = new Uint8Array(bytesPerRow * height);
+  for (let y = 0; y < height; y++) {
+    for (let bx = 0; bx < bytesPerRow; bx++) {
+      let v = 0;
+      for (let bit = 0; bit < 8; bit++) {
+        const x = bx * 8 + bit;
+        const pixel = (x < width) ? mono[y * width + x] : 0;
+        v = (v << 1) | (pixel & 1);
+      }
+      packed[y * bytesPerRow + bx] = v;
+    }
+  }
+  return { width, height, bytesPerRow, packed };
+}
+
+/** ========= 分包寫入 ========= **/
+function chunkArray(u8, size) {
+  const chunks = [];
+  for (let i = 0; i < u8.length; i += size) {
+    chunks.push(u8.subarray(i, Math.min(i + size, u8.length)));
+  }
+  return chunks;
+}
+async function writeChunks(chunks, gapMs = 10) {
+  for (const c of chunks) {
+    if (writeChar.properties.writeWithoutResponse) {
+      await writeChar.writeValueWithoutResponse(c);
+    } else {
+      await writeChar.writeValue(c);
+    }
+    if (gapMs) await sleep(gapMs);
+  }
+}
+
+/** ========= 7) 送出位圖資料（注意：不一定會印出，因為 P2HD 可能需要特定協議封包） ========= **/
+document.getElementById('btnSendBitmap').addEventListener('click', async () => {
+  try {
+    if (!writeChar) throw new Error('請先 Connect 並選定 writable characteristic。');
+    if (!composedImageData) throw new Error('請先按「合成圖片+詩」到 Canvas。');
+
+    log('--- SEND BITMAP (RAW STREAM) ---');
+    const bm = imageDataTo1BitPacked(composedImageData, 160);
+    log(`Bitmap packed: ${bm.width}x${bm.height}, bytesPerRow=${bm.bytesPerRow}, total=${bm.packed.length} bytes`);
+
+    // 重要：這裡只是把「打包後的位圖資料」當 raw bytes 串流送出。
+    // 很多 P2HD 需要 "0x02...0x03" 的列印命令封包才能真的開始印。
+    // 你先用這一步測試 BLE 大量寫入是否穩定，並把 notify/log 貼回來，我再幫你補「正確封包協定」。
+
+    const CHUNK = 180; // 新手先保守（避免 MTU 限制）。穩了可調 200/240/244
+    const chunks = chunkArray(bm.packed, CHUNK);
+
+    log(`Sending chunks: ${chunks.length}, chunkSize=${CHUNK} ...`);
+    alert('開始送出位圖資料（raw）。若沒印出，屬正常：接下來需要對接 P2HD 列印封包協定。');
+
+    await writeChunks(chunks, 10);
+
+    log('✅ Raw bitmap bytes sent.');
+    alert('已送完位圖資料。請看 log / notify 是否有回應。');
+
+  } catch (e) {
+    log('❌ SEND error:', e.message);
+    alert('送出失敗：' + e.message);
   }
 });
 </script>
 </body>
 </html>
-
